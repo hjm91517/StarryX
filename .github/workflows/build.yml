@@ -1,0 +1,86 @@
+name: build
+on:
+  push:
+    branches: [ main ]
+    paths-ignore: [ 'ci-logs/**', 'dist/**', '*.md' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+  EXPECTED_SHA256: 59f11c0beff78640bee58d66929d1f806b131ddb026ef14611831a3da6e16744
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解包源码
+        run: |
+          python3 - <<'PY'
+          import base64
+          data = base64.b64decode(open('src.b64').read())
+          open('/tmp/src.tar.xz','wb').write(data)
+          print('bytes', len(data))
+          PY
+          echo "$EXPECTED_SHA256  /tmp/src.tar.xz" | shasum -a 256 -c -
+          tar -xJf /tmp/src.tar.xz
+          ls -la Makefile STARS | head
+
+      - name: 安装 Theos
+        run: |
+          brew install ldid xz || true
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          if curl -fsSL https://raw.githubusercontent.com/theos/sdks/master/iPhoneOS16.5.sdk.tar.xz -o /tmp/sdk.tar.xz \
+             && tar -tJf /tmp/sdk.tar.xz >/dev/null 2>&1; then
+            tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+          else
+            git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+            cp -R /tmp/sdks/iPhoneOS*.sdk "$THEOS/sdks/" || true
+          fi
+          ls "$THEOS/sdks"
+          echo "$THEOS/bin" >> $GITHUB_PATH
+
+      - name: 编译
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          make clean all FINALPACKAGE=1 DEBUG=0 ARCHS="arm64 arm64e" \
+            TARGET="iphone:clang:latest:15.0" 2>&1 | tee build.log
+
+      - name: 回写日志与产物
+        if: always()
+        run: |
+          mkdir -p ci-logs dist
+          cp build.log ci-logs/build.log 2>/dev/null || true
+          outcome="${{ steps.build.outcome }}"
+          d=$(find .theos/obj -name 'StarryX.dylib' 2>/dev/null | head -1 || true)
+          if [ -n "$d" ]; then
+            cp "$d" dist/StarryX.dylib
+            ldid -S dist/StarryX.dylib 2>/dev/null || true
+            shasum -a 256 dist/StarryX.dylib > dist/SHA256.txt
+            cp tools/patch_ipa.py dist/patch_ipa.py || true
+            lipo -info dist/StarryX.dylib > dist/ARCH.txt || true
+          fi
+          printf '{"outcome":"%s","sha":"%s","when":"%s","dylib":"%s"}\n' \
+            "$outcome" "$GITHUB_SHA" "$(date -u +%FT%TZ)" "${d:-none}" > ci-logs/status.json
+          git config user.name "ci-bot"
+          git config user.email "ci@local"
+          git add -f ci-logs dist
+          git commit -m "ci: ${outcome} [skip ci]" || true
+          git push || true
+
+      - name: 上传 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: starryx-out
+          path: |
+            dist/
+            ci-logs/build.log
