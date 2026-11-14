@@ -1,0 +1,23 @@
+name: probe
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 记录 runner
+        run: |
+          { date -u; echo "runner=$RUNNER_NAME"; echo "repo=$GITHUB_REPOSITORY"; uname -a; } > ci-probe.txt
+          cat ci-probe.txt
+      - name: 回写结果
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci@local"
+          git add ci-probe.txt
+          git commit -m "ci: probe ok [skip ci]" || true
+          git push || true
